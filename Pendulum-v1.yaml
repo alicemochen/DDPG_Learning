@@ -1,0 +1,14 @@
+critic_lr: 0.002
+actor_lr: 0.001
+
+total_episodes: 100
+# Discount factor for future rewards
+gamma: 0.99
+# Used to update target networks
+tau: 0.005
+
+
+state_features_num: 3
+action_features_num: 1
+upper_bound: 2
+lower_bound: -2

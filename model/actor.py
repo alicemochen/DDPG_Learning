@@ -11,12 +11,19 @@ class Actor(tf.keras.Model):
         self.dense2 = Dense(256, activation="relu")
         self.dense3 = Dense(1, activation="tanh", kernel_initializer=last_init)
 
+    def params_from_config(self, config):
+        self.upper_bound = config["upper_bound"]
+        self.lower_bound = config["lower_bound"]
+
     def call(self, inputs):
         x = self.dense1(inputs)
         x = self.dense2(x)
         return self.dense3(x)
 
-    def get_action(self, state):
+    def get_action(self, state, noise=None):
         sampled_action = tf.squeeze(self.call(state))
-        noise = np.random.randn()
-        return sampled_action+noise
+        if noise is None:
+            noise = 0
+        else:
+            noise = noise()
+        return tf.squeeze(tf.clip_by_value(sampled_action+noise, self.lower_bound, self.upper_bound))
