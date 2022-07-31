@@ -7,6 +7,7 @@ from matplotlib import pyplot as plt
 from model.actor import Actor
 from model.buffer import Buffer
 from model.critic import Critic
+from model.second_order_critic import SecondOrderCritic
 from random_processes.ornstein_uhlenbeck import OUActionNoise
 
 
@@ -90,6 +91,7 @@ def train_mean_var(state_batch, action_batch, reward_batch, next_state_batch,
     update_target(target_actor.variables, actor.variables, tau)
     update_target(target_critic.variables, critic.variables, tau)
     update_target(target_second_order.variables, second_order.variables, tau)
+    return critic_loss, second_order_loss, actor_loss
 
 
 
@@ -97,10 +99,10 @@ if __name__ == '__main__':
     # 2 copies of actors and critics
     actor = Actor()
     critic = Critic()
-    second_order = Critic()
+    second_order = SecondOrderCritic()
     target_actor = Actor()
     target_critic = Critic()
-    target_second_order = Critic()
+    target_second_order = SecondOrderCritic()
     target_actor.set_weights(actor.get_weights())
     target_critic.set_weights(critic.get_weights())
     target_second_order.set_weights(second_order.get_weights())
@@ -121,6 +123,12 @@ if __name__ == '__main__':
     pred_vals = []
     pred_stds = []
     pred_tgts = []
+    pred_second_orders = []
+
+    critic_loss_vals = []
+    second_order_loss_vals = []
+    actor_loss_vals = []
+
     with open(f"{problem}.yaml", "r") as f:
         config = yaml.safe_load(f)
 
@@ -129,7 +137,7 @@ if __name__ == '__main__':
 
     actor_optimizer = tf.keras.optimizers.Adam(config["actor_lr"])
     critic_optimizer = tf.keras.optimizers.Adam(config["critic_lr"])
-    second_order_optimizer = tf.keras.optimizers.Adam(config["critic_lr"])
+    second_order_optimizer = tf.keras.optimizers.SGD()
     buffer = Buffer(config)
 
     # Takes about 4 min to train
@@ -154,22 +162,28 @@ if __name__ == '__main__':
                 train_mean(state_batch, action_batch, reward_batch, next_state_batch,
                                config["tau"], config["gamma"])
             else:
-                train_mean_var(state_batch, action_batch, reward_batch, next_state_batch,
-                           config["tau"], config["gamma"], penalty_const)
+                critic_loss, second_order_loss, actor_loss = train_mean_var(state_batch, action_batch, reward_batch, next_state_batch,config["tau"], config["gamma"], penalty_const)
+                critic_loss_vals.append(critic_loss)
+                second_order_loss_vals.append(second_order_loss)
+                actor_loss_vals.append(actor_loss)
+                prev_state = state
+                curr_init_action_batch = tf.expand_dims(tf.expand_dims(target_actor.get_action(init_state_batch), -1),
+                                                        1)
+                pred_val = tf.get_static_value(target_critic([init_state_batch, curr_init_action_batch])[0, 0])
+                pred_second_order = tf.get_static_value(
+                    target_second_order([init_state_batch, curr_init_action_batch])[0, 0])
+                pred_std = np.sqrt(max(pred_second_order - pred_val * pred_val, 0))
+                pred_vals.append(pred_val)
+                pred_second_orders.append(pred_second_order)
+                pred_stds.append(pred_std)
+                pred_tgts.append(pred_val - penalty_const * pred_std)
             if done:
                 break
-            prev_state = state
-            curr_init_action_batch = tf.expand_dims(tf.expand_dims(target_actor.get_action(init_state_batch),-1), 1)
-            pred_val = tf.get_static_value(target_critic([init_state_batch, curr_init_action_batch])[0, 0])
-            pred_second_order = tf.get_static_value(target_second_order([init_state_batch, curr_init_action_batch])[0, 0])
-            pred_std = np.sqrt(max(pred_second_order - pred_val*pred_val, 0))
-            pred_vals.append(pred_val)
-            pred_stds.append(pred_std)
-            pred_tgts.append(pred_val - penalty_const*pred_std)
         ep_reward_list.append(episodic_reward)
-        # Mean of last 40 episodes
-        avg_reward = np.mean(ep_reward_list[-40:])
-        std_reward = np.std(ep_reward_list[-40:])
+        # Mean of last x episodes
+        roll = 20
+        avg_reward = np.mean(ep_reward_list[-roll:])
+        std_reward = np.std(ep_reward_list[-roll:])
         tgt_func = avg_reward - penalty_const*std_reward
         print("Episode * {} * Avg Reward is ==> {}".format(ep, avg_reward))
         print("Episode * {} * Reward Std is ==> {}".format(ep, std_reward))
@@ -186,23 +200,33 @@ if __name__ == '__main__':
     ax2.set_ylabel('Reward Std.')
     ax2.plot(std_reward_list, label="Std Reward", color="blue")
     fig.legend(loc="upper right")
-    fig.savefig(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\{problem}\\{method}_penalty_{penalty_const}_{episodes}.png")
+    fig.savefig(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_rolling{roll}.png")
     plt.close()
     target_actor.save(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\trained_models\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_target_actor")
     target_critic.save(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\trained_models\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_target_critic")
     if method =="mean_var":
         target_second_order.save(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\trained_models\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_target_second_order")
+        fig, ax1 = plt.subplots()
+        ax1.set_ylabel('Pred Final Reward')
+        ax1.set_xlabel('Train Steps')
+        ax1.plot(pred_vals[1000:], label="pred valued", color="red")
+        ax1.plot(pred_tgts[1000:], label="pred tgt", color="green")
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Pred Reward Std.')
+        ax2.plot(pred_second_orders[1000:], label="pred second Order", color="blue")
+        fig.legend(loc="upper right")
+        # fig.savefig(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\mean_var_penalty_{penalty_const}.png")
+        fig.savefig(
+            f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_pred.png")
+        plt.close()
 
-    fig, ax1 = plt.subplots()
-    ax1.set_ylabel('Pred Final Reward')
-    ax1.set_xlabel('Train Steps')
-    ax1.plot(pred_vals, label="Avg Reward", color="red")
-    ax1.plot(pred_tgts, label="Std. Adj. Reward", color="green")
-    ax2 = ax1.twinx()
-    ax2.set_ylabel('Pred Reward Std.')
-    ax2.plot(pred_stds, label="Std Reward", color="blue")
-    fig.legend(loc="upper right")
-    # fig.savefig(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\mean_var_penalty_{penalty_const}.png")
-    fig.savefig(
-        f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_pred.png")
-    plt.close()
+        fig, ax1 = plt.subplots()
+        ax1.set_ylabel('Critic Loss')
+        ax1.set_xlabel('Train Steps')
+        ax1.plot(critic_loss_vals[10:], label="critic_loss_vals", color="red")
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Second order loss')
+        ax2.plot(second_order_loss_vals[10:], label="Second Order", color="blue")
+        fig.legend(loc="upper right")
+        fig.savefig(f"C:\\Users\\Alice\\Desktop\\学业\\Summer 2022\\DDPG_Learning\\figs\\{problem}\\{method}_penalty_{penalty_const}_{episodes}_loss_vals.png")
+        plt.close()
